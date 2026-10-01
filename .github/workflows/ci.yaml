@@ -94,17 +94,58 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Fetch the push base for multi-commit pushes
+        # fetch-depth 2 only reaches the last commit of a push; a push that
+        # stacks several commits needs the previous branch tip to diff the
+        # whole push, or components touched only in earlier commits skip CI.
+        if: github.event_name == 'push'
+        run: |
+          set -e
+          BEFORE="${{ github.event.before }}"
+          if [ -z "$BEFORE" ]; then
+            exit 0
+          fi
+          case "$BEFORE" in
+            *[!0]*)
+              git fetch --quiet --depth=1 origin "$BEFORE" \
+                || echo "::warning::could not fetch push base $BEFORE"
+              ;;
+            *)
+              # All-zero SHA: force push or first push of a branch; nothing
+              # to fetch, the detection step falls back to the empty-tree
+              # diff.
+              ;;
+          esac
+
       - name: Check which components changed
         id: changes
         run: |
           set -e
           echo "=== Detect Changes ==="
 
-          # Get changed files
-          if git rev-parse HEAD~1 >/dev/null 2>&1; then
-            CHANGED=$(git diff --name-only HEAD~1 HEAD || true)
+          # Diff the full event range, not just the head commit.
+          # - pull_request: checkout lands on the merge commit whose first
+          #   parent is the base branch tip, so HEAD~1 spans the whole PR.
+          # - push: github.event.before is the previous branch tip (fetched
+          #   above). On a force push or a branch's first push it is absent,
+          #   and the empty-tree diff reports every component the head commit
+          #   tree contains paths for.
+          BASE=""
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            BASE="HEAD~1"
           else
-            CHANGED=$(git diff --name-only --diff-filter=ACMRT HEAD || true)
+            BEFORE="${{ github.event.before }}"
+            if [ -n "$BEFORE" ] && git rev-parse --verify --quiet "${BEFORE}^{commit}" >/dev/null 2>&1; then
+              BASE="$BEFORE"
+            fi
+          fi
+
+          if [ -n "$BASE" ] && git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null 2>&1; then
+            CHANGED=$(git diff --name-only "$BASE" HEAD)
+          else
+            EMPTY_TREE=$(git hash-object -t tree /dev/null)
+            CHANGED=$(git diff --name-only "$EMPTY_TREE" HEAD)
+            echo "::warning::no usable base commit; diffing the head tree"
           fi
           echo "Changed files:"
           echo "$CHANGED"
