@@ -65,16 +65,44 @@ def read_text(path: str) -> str:
         raise ValueError(f"{path}: contract file not found in repository") from None
 
 
+def _version_from_toml(data: object) -> str | None:
+    """Return the component version from a parsed TOML document.
+
+    The version lives at the top level or in one of the conventional
+    sections: ``[package]``, ``[workspace.package]``, or ``[component]``.
+    Dependency tables such as ``[workspace.dependencies]`` also contain
+    ``version`` keys and must never satisfy the lookup.
+    """
+    workspace_table = data.get("workspace") if isinstance(data, dict) else None
+    candidates = [
+        data,
+        data.get("package") if isinstance(data, dict) else None,
+        workspace_table.get("package") if isinstance(workspace_table, dict) else None,
+        data.get("component") if isinstance(data, dict) else None,
+    ]
+    for table in candidates:
+        if isinstance(table, dict):
+            version = table.get("version")
+            if isinstance(version, str):
+                return version
+    return None
+
+
 def read_toml_version(path: str) -> str:
     text = read_text(path)
     if tomllib is not None:
         try:
             data = tomllib.loads(text)
-            version = data.get("version")
-            if isinstance(version, str):
-                return version
-        except tomllib.TOMLDecodeError:
-            pass
+        except tomllib.TOMLDecodeError as e:
+            raise ValueError(
+                f"{path}: malformed TOML ({e}); a version matched inside it cannot be trusted"
+            ) from e
+        version = _version_from_toml(data)
+        if version is not None:
+            return version
+        raise ValueError(f"no version field in {path} (component: {path.rsplit('/', 1)[0]})")
+    # Python < 3.11 has no tomllib; keep the line-based fallback explicit
+    # and best-effort instead of failing every contract at once.
     match = VERSION_RE.search(text)
     if not match:
         raise ValueError(f"no version field in {path} (component: {path.rsplit('/', 1)[0]})")
